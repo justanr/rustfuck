@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Result, Write};
 
 const TAPE_SIZE: i32 = 30000;
+type JumpLocs = (usize, usize);
+type Tokens = Vec<BrainFuckToken>;
 
 #[derive(Debug)]
 enum BrainFuckToken {
@@ -19,94 +21,67 @@ impl Display for BrainFuckToken {
     fn fmt(&self, f: &mut Formatter) -> Result {
             match self {
             &Move(x) => {
-                write!(f, "M{} ", &x)
+                write!(f, " M{}", &x)
             },
-            &JumpB(_) | &JumpF(_) => { write!(f, "") },
+            &JumpF(_) => { write!(f, " [") },
+            &JumpB(_) => { write!(f, " ]") },
             &Incr(x) => {
-                write!(f, "I{} ", &x)
+                write!(f, " I{}", &x)
             },
             &StdOut => {
-                write!(f, "O ")
+                write!(f, "O")
             },
             &StdIn => {
-                write!(f, "I ")
+                write!(f, " I")
             }
         }
     }
 }
 
-
-
 #[derive(Debug)]
 struct Trace {
-    current_trace: Option<String>,
-    traces: Vec<String>,
-    count: HashMap<String, u32>,
-    suggested: usize
+    count: HashMap<JumpLocs, u32>,
 }
 
 impl Trace {
-    fn new(suggested: usize) -> Trace {
+    fn new() -> Trace {
         Trace {
-            current_trace: None,
-            traces: Vec::new(),
             count: HashMap::new(),
-            suggested: suggested
         }
     }
 
     fn reset(&mut self) {
-        self.current_trace = None;
-        self.traces = Vec::new();
         self.count = HashMap::new();
     }
 
-    fn begin(&mut self) {
-        match self.current_trace.take() {
-            None => {},
-            Some(x) => self.traces.push(x)
-        }
-
-        self.current_trace = Some(String::with_capacity(self.suggested * 2));
+    fn trace(&mut self, locs: JumpLocs) {
+        let c = self.count.entry(locs).or_insert(0);
+        *c += 1;
     }
 
-    fn end(&mut self) {
-        match self.current_trace.take() {
-            Some(trace) => {
-                let c = self.count.entry(trace).or_insert(0);
-                *c += 1;
-            },
-            None => {}
-        };
-
-        self.current_trace = self.traces.pop();
-    }
-
-    fn add(&mut self, token: &BrainFuckToken) {
-        if self.current_trace.is_some() {
-            let trace = self.current_trace.as_mut().unwrap();
-            write!(trace, "{}", token).ok();
+    fn report(&mut self, prog: &Vec<BrainFuckToken>) -> HashMap<String, u32> {
+        let mut report: HashMap<String, u32> = HashMap::new();
+        for (name, c) in self.count
+            .iter()
+            .filter(|&(_, c)| { *c > 100})
+            .map(|(locs, c)| { (token_run_to_string(locs, prog), c) }) {
+            let e = report.entry(name).or_insert(0);
+            *e += c;
         }
-    }
-
-
-    fn end_all(&mut self) {
-        while self.current_trace.is_some() {
-            self.end();
-        }
-    }
-
-    fn report(&mut self) -> Vec<(&String, &u32)> {
-        if self.current_trace.is_some() {
-            panic!("Last loop didn't end!");
-        }
-        let mut report: Vec<(&String, &u32)> = self.count.iter().collect();
-        report.sort_by(|&(_, a), &(_, b)| {
-            b.cmp(a)
-        });
 
         report
     }
+}
+
+fn token_run_to_string(locs: &JumpLocs, ops: &Tokens) -> String {
+    let (start, finish) = *locs;
+    let mut s = String::with_capacity(finish - start + 1);
+
+    for token in &ops[start..finish+1] {
+        write!(s, "{}", token);
+    }
+
+    s
 }
 
 
@@ -155,12 +130,12 @@ struct Program {
 }
 
 impl Program {
-    fn new(ops: Vec<BrainFuckToken>, longest: usize) -> Program {
+    fn new(ops: Vec<BrainFuckToken>) -> Program {
         Program {
             loc: 0,
             ops: ops,
             tape: Tape::new(),
-            tracer: Trace::new(longest),
+            tracer: Trace::new(),
         }
     }
 
@@ -174,29 +149,24 @@ impl Program {
                     if self.tape.get() == 0 {
                         self.loc = x;
                     } else {
-                        self.tracer.begin();
+                        self.tracer.trace((self.loc, x));
                     }
                 },
                 JumpB(x) => {
                     if self.tape.get() != 0 {
                         self.loc = x;
                     }
-                    self.tracer.end();
                 },
                 Move(x) => {
-                    self.tracer.add(instr);
                     self.tape.move_(x)
                 },
                 Incr(x) => {
-                    self.tracer.add(instr);
                     self.tape.incr(x)
                 },
                 StdIn => {
-                    self.tracer.add(instr);
                     self.tape.put(input_iter.next().unwrap_or('\0'))
                 },
                 StdOut => {
-                    self.tracer.add(instr);
                     out.push(self.tape.getc());
                 }
             }
@@ -208,7 +178,6 @@ impl Program {
         let mut tokens = Vec::with_capacity(prog.len());
         let mut brackets = Vec::new();
         let mut loc: usize = 0;
-        let mut longest = 0;
 
         while let Some(&symbol) = prog.get(loc) {
             match symbol {
@@ -229,11 +198,6 @@ impl Program {
                         },
                         sym => { panic!("Expected jump, found {:?}", &sym); }
                     };
-
-                    let suggest = loc - idx;
-                    if longest < suggest {
-                        longest = suggest;
-                    }
 
                     tokens.push(JumpB(idx));
                     loc += 1;
@@ -270,7 +234,7 @@ impl Program {
         }
 
         tokens.shrink_to_fit();
-        Program::new(tokens, longest)
+        Program::new(tokens)
     }
 }
 
@@ -327,10 +291,12 @@ fn main() {
     prog.run(input, &mut output);
     println!("{}", output);
 
-    prog.tracer.end_all();
+    let r = prog.tracer.report(&prog.ops);
 
-    for (name, count) in prog.tracer.report() {
+    let mut report: Vec<(&String, &u32)> = r.iter().collect();
+    report.sort_by(|&(_, a), &(_, b)| {b.cmp(a)});
+
+    for (name, count) in report {
         println!("{} -> {}", name, count);
     }
-
 }
