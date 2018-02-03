@@ -78,7 +78,7 @@ fn token_run_to_string(locs: &JumpLocs, ops: &Tokens) -> String {
     let mut s = String::with_capacity(finish - start + 1);
 
     for token in &ops[start..finish+1] {
-        write!(s, "{}", token);
+        write!(s, "{}", token).ok();
     }
 
     s
@@ -289,8 +289,9 @@ fn main() {
     let input = String::new();
     let mut output = String::new();
     prog.run(input, &mut output);
-    println!("{}", output);
+    println!("Output:\n{}", output);
 
+    println!("\nTrace:\n");
     let r = prog.tracer.report(&prog.ops);
 
     let mut report: Vec<(&String, &u32)> = r.iter().collect();
