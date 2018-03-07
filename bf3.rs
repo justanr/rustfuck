@@ -1,89 +1,65 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter, Result, Write};
+use std::mem::replace;
+use std::iter::FromIterator;
 
-const TAPE_SIZE: usize = 30000;
-type AST = VecDeque<BrainFuckAST>;
-type BrainFuckProgram = Vec<BrainFuckOpCode>;
-type Jump = (usize, usize);
-type JumpTable = HashMap<usize, usize>;
-type TraceReport = HashMap<String, u32>;
+const TAPE_SIZE: i32 = 30000;
+type JumpLocs = (usize, usize);
+type Tokens = Vec<BrainFuckToken>;
 
-
-#[derive(Debug, PartialEq, Eq)]
-enum BrainFuckAST {
-    MoveR,
-    MoveL,
-    Incr,
-    Decr,
-    Loop(AST),
-    StdIn,
-    StdOut
-}
-
-
-#[derive(Debug)]
-enum BrainFuckOpCode {
+#[derive(Debug, Clone, Copy)]
+enum BrainFuckToken {
     Move(isize),
+    JumpF(usize),
+    JumpB(usize),
     Incr(i32),
-    JumpF,
-    JumpB,
     StdOut,
     StdIn,
     ZeroOut,
 }
 
 
-impl Display for BrainFuckOpCode {
+impl Display for BrainFuckToken {
     fn fmt(&self, f: &mut Formatter) -> Result {
-        match *self {
-            BrainFuckOpCode::Move(x) => { write!(f, " M{}", &x) },
-            BrainFuckOpCode::Incr(x) => { write!(f, " I{}", &x) },
-            BrainFuckOpCode::JumpF   => { write!(f, " [") },
-            BrainFuckOpCode::JumpB   => { write!(f, " ]") },
-            BrainFuckOpCode::StdOut  => { write!(f, " O") },
-            BrainFuckOpCode::StdIn   => { write!(f, " I") },
-            BrainFuckOpCode::ZeroOut => { write!(f, " @") },
+        match self {
+            &BrainFuckToken::Move(x) => write!(f, " M{}", &x),
+            &BrainFuckToken::JumpF(_) => write!(f, " ["),
+            &BrainFuckToken::JumpB(_) => write!(f, " ]"),
+            &BrainFuckToken::Incr(x) => write!(f, " I{}", &x),
+            &BrainFuckToken::StdOut => write!(f, "O"),
+            &BrainFuckToken::StdIn => write!(f, " I"),
+            &BrainFuckToken::ZeroOut => write!(f, " @"),
         }
     }
 }
 
 #[derive(Debug)]
-struct Trace(HashMap<Jump, u32>);
-
-struct Tape {
-    loc: usize,
-    tape: [i32; TAPE_SIZE]
+struct Trace {
+    count: HashMap<JumpLocs, u32>,
 }
-
-struct Program {
-    loc: usize,
-    ops: BrainFuckProgram,
-    jumps: JumpTable,
-    tape: Tape,
-    trace: Trace
-}
-
 
 impl Trace {
     fn new() -> Trace {
-        Trace(HashMap::new())
+        Trace {
+            count: HashMap::new(),
+        }
     }
 
     fn reset(&mut self) {
-        self.0 = HashMap::new();
+        self.count = HashMap::new();
     }
 
-    fn trace(&mut self, locs: Jump) {
-        let c = self.0.entry(locs).or_insert(0);
+    fn trace(&mut self, locs: JumpLocs) {
+        let c = self.count.entry(locs).or_insert(0);
         *c += 1;
     }
 
-    fn report(&mut self, prog: &BrainFuckProgram) -> TraceReport {
-        let mut report = TraceReport::new();
-        for (name, c) in self.0
-                .iter()
-                .filter(|&(_, x)| *x > 100)
-                .map(|(locs, c)| { (token_run_to_string(&locs, &prog), c)})
+    fn report(&mut self, prog: &Vec<BrainFuckToken>) -> HashMap<String, u32> {
+        let mut report: HashMap<String, u32> = HashMap::new();
+        for (name, c) in self.count
+            .iter()
+            .filter(|&(_, c)| *c > 100)
+            .map(|(locs, c)| (token_run_to_string(locs, prog), c))
         {
             let e = report.entry(name).or_insert(0);
             *e += c;
@@ -93,26 +69,37 @@ impl Trace {
     }
 }
 
+fn token_run_to_string(locs: &JumpLocs, ops: &Tokens) -> String {
+    let (start, finish) = *locs;
+    let mut s = String::with_capacity(finish - start + 1);
+
+    for token in &ops[start..finish + 1] {
+        write!(s, "{}", token).ok();
+    }
+
+    s
+}
+
+struct Tape {
+    loc: usize,
+    tape: [i32; 30000],
+}
 
 impl Tape {
     fn new() -> Tape {
         Tape {
             loc: 0,
-            tape: [0i32; TAPE_SIZE]
+            tape: [0i32; 30000],
         }
     }
 
-    fn move_(&mut self, how_far: isize) {
-        let spaces = self.loc as i32 + how_far as i32;
-        self.loc = (spaces % TAPE_SIZE as i32) as usize;
+    fn move_(&mut self, move_: isize) {
+        let spaces = self.loc as i32 + move_ as i32;
+        self.loc = (spaces % TAPE_SIZE) as usize;
     }
 
     fn incr(&mut self, inc: i32) {
         self.tape[self.loc] += inc;
-    }
-
-    fn zero(&mut self) {
-        self.tape[self.loc] = 0;
     }
 
     fn get(&self) -> i32 {
@@ -123,105 +110,117 @@ impl Tape {
         self.get() as u8 as char
     }
 
-    fn put(&mut self, c: char) {
+    fn put(&mut self, x: i32) {
+        self.tape[self.loc] = x;
+    }
+
+    fn putc(&mut self, c: char) {
         self.tape[self.loc] = c as i32;
     }
 }
 
+struct Program {
+    loc: usize,
+    ops: Vec<BrainFuckToken>,
+    tape: Tape,
+    tracer: Trace,
+}
+
 impl Program {
-    fn new(ops: BrainFuckProgram, jumps: JumpTable) -> Program {
+    fn new(ops: Vec<BrainFuckToken>) -> Program {
         Program {
             loc: 0,
             ops: ops,
-            jumps: jumps,
             tape: Tape::new(),
-            trace: Trace::new()
+            tracer: Trace::new(),
         }
     }
 
     fn run(&mut self, input: String, out: &mut String) {
-        self.trace.reset();
+        self.tracer.reset();
         let mut input_iter = input.chars();
 
         while let Some(instr) = self.ops.get(self.loc) {
             match *instr {
-                BrainFuckOpCode::Move(x) => { self.tape.move_(x); },
-                BrainFuckOpCode::Incr(x) => { self.tape.incr(x); },
-                BrainFuckOpCode::StdIn => { self.tape.put(input_iter.next().unwrap_or('\0')); },
-                BrainFuckOpCode::StdOut => { out.push(self.tape.getc()); },
-                BrainFuckOpCode::ZeroOut => { self.tape.zero(); },
-                BrainFuckOpCode::JumpF => {
-                    let partner = self.jumps.get(&self.loc)
-                        .unwrap_or_else(|| {
-                            println!("Current Loc: {}", self.loc);
-                            println!("{:#?}", &self.jumps);
-                            println!("{:#?}", &self.ops);
-                            panic!("couldnt find JumpF partner")
-                        });
+                BrainFuckToken::JumpF(x) => {
                     if self.tape.get() == 0 {
-                        self.loc = *partner;
+                        self.loc = x;
                     } else {
-                        self.trace.trace((self.loc, *partner));
+                        self.tracer.trace((self.loc, x));
                     }
-                },
-                BrainFuckOpCode::JumpB => {
-                    let partner = self.jumps.get(&self.loc)
-                        .unwrap_or_else(|| {
-                            println!("Current Loc: {}", self.loc);
-                            println!("{:#?}", &self.jumps);
-                            println!("{:#?}", &self.ops);
-                            panic!("couldnt find JumpB partner");
-                        }
-                        );
+                }
+                BrainFuckToken::JumpB(x) => {
                     if self.tape.get() != 0 {
-                        self.loc = *partner;
+                        self.loc = x;
                     }
-                },
+                }
+                BrainFuckToken::Move(x) => self.tape.move_(x),
+                BrainFuckToken::Incr(x) => self.tape.incr(x),
+                BrainFuckToken::StdIn => self.tape.putc(input_iter.next().unwrap_or('\0')),
+                BrainFuckToken::StdOut => out.push(self.tape.getc()),
+                BrainFuckToken::ZeroOut => self.tape.put(0),
             }
             self.loc += 1;
         }
     }
 }
 
-fn parse<T>(raw: &mut T) -> AST
-    where T: Iterator<Item=char>
-{
-    let mut tokens = AST::new();
-
-    while let Some(op) = raw.next() {
-        match op {
-            '+' => { tokens.push_back(BrainFuckAST::Incr); },
-            '-' => { tokens.push_back(BrainFuckAST::Decr); },
-            '>' => { tokens.push_back(BrainFuckAST::MoveR); },
-            '<' => { tokens.push_back(BrainFuckAST::MoveL); },
-            '.' => { tokens.push_back(BrainFuckAST::StdOut); },
-            ',' => { tokens.push_back(BrainFuckAST::StdIn); },
-            '[' => { tokens.push_back(BrainFuckAST::Loop(parse(raw))); },
-            ']' => { return tokens; },
-            _ => {}
+impl BrainFuckToken {
+    pub fn from_char(c: char) -> Option<BrainFuckToken> {
+        match c {
+            '+' => Some(BrainFuckToken::Incr(1)),
+            '-' => Some(BrainFuckToken::Incr(-1)),
+            '>' => Some(BrainFuckToken::Move(1)),
+            '<' => Some(BrainFuckToken::Move(-1)),
+            '.' => Some(BrainFuckToken::StdOut),
+            ',' => Some(BrainFuckToken::StdIn),
+            '[' => Some(BrainFuckToken::JumpF(0)),
+            ']' => Some(BrainFuckToken::JumpB(0)),
+            _ => None,
         }
     }
-
-    tokens
 }
 
+fn parse<T>(source: T) -> VecDeque<BrainFuckToken>
+where
+    T: Iterator<Item = char>,
+{
+    VecDeque::from_iter(source.filter_map(BrainFuckToken::from_char))
+}
 
-fn optimize(mut ast: AST) -> BrainFuckProgram {
-    let mut program = BrainFuckProgram::new();
+fn optimize(tokens: VecDeque<BrainFuckToken>) -> Vec<BrainFuckToken> {
+    let mut program = handle_zero_out(collapse_tokens(tokens));
+    build_jumps(&mut program);
+    program.into()
+}
 
-    while let Some(node) = ast.pop_front() {
-        match node {
-            BrainFuckAST::Loop(nodes) => {
-                program.append(&mut compress_loop(nodes));
-            },
-            BrainFuckAST::StdOut => {
-                program.push(BrainFuckOpCode::StdOut);
-            },
-            BrainFuckAST::StdIn => {
-                program.push(BrainFuckOpCode::StdIn);
-            },
+fn collapse_tokens(mut tokens: VecDeque<BrainFuckToken>) -> VecDeque<BrainFuckToken> {
+    let mut program = VecDeque::new();
+
+    while let Some(token) = tokens.pop_front() {
+        if program.len() == 0 {
+            program.push_back(token);
+            continue;
+        }
+
+        let previous = program.pop_back().unwrap();
+
+        match (previous, token) {
+            (BrainFuckToken::Incr(x), BrainFuckToken::Incr(y)) => {
+                let v = x + y;
+                if v != 0 {
+                    program.push_back(BrainFuckToken::Incr(v));
+                }
+            }
+            (BrainFuckToken::Move(x), BrainFuckToken::Move(y)) => {
+                let v = x + y;
+                if v != 0 {
+                    program.push_back(BrainFuckToken::Move(v));
+                }
+            }
             _ => {
-                collapse(node, &mut ast, &mut program);
+                program.push_back(previous);
+                program.push_back(token);
             }
         }
     }
@@ -229,123 +228,60 @@ fn optimize(mut ast: AST) -> BrainFuckProgram {
     program
 }
 
+fn handle_zero_out(mut tokens: VecDeque<BrainFuckToken>) -> Vec<BrainFuckToken> {
+    let mut program = Vec::new();
 
+    while let Some(token) = tokens.pop_front() {
+        program.push(token);
 
-fn collapse(search: BrainFuckAST, mut ast: &mut AST, program: &mut BrainFuckProgram) {
-    match search {
-        BrainFuckAST::Incr => {
-        let result = calculate_collapse(search, BrainFuckAST::Decr, &mut ast);
-        if result != 0 {
-            program.push(BrainFuckOpCode::Incr(result));
+        if program.len() < 3 {
+            continue;
         }
-        },
-        BrainFuckAST::Decr => {
-            let result = calculate_collapse(search, BrainFuckAST::Incr, &mut ast);
-            program.push(BrainFuckOpCode::Incr(-result));
-        },
-        BrainFuckAST::MoveR => {
-            let result = calculate_collapse(search, BrainFuckAST::MoveL, &mut ast) as isize;
-            program.push(BrainFuckOpCode::Move(result));
-        },
-        BrainFuckAST::MoveL => {
-            let result = calculate_collapse(search, BrainFuckAST::MoveR, &mut ast) as isize;
-            program.push(BrainFuckOpCode::Move(-result));
-        },
-        _ => {}
-    }
 
-}
+        let (third, second, first) = (
+            program.pop().unwrap(),
+            program.pop().unwrap(),
+            program.pop().unwrap(),
+        );
 
-fn calculate_collapse(search: BrainFuckAST, opposite: BrainFuckAST, ast: &mut AST) -> i32 {
-    let mut count = 1;
-
-    while let Some(node) = ast.pop_front() {
-        match node {
-            _ if node == search => {
-                count += 1;
-            },
-            _ if node == opposite => {
-                count -= 1;
+        match (first, second, third) {
+            (BrainFuckToken::JumpF(_), BrainFuckToken::Incr(x), BrainFuckToken::JumpB(_))
+                if x < 0 =>
+            {
+                program.push(BrainFuckToken::ZeroOut);
             }
             _ => {
-                ast.push_front(node);
-                break;
+                program.push(first);
+                program.push(second);
+                program.push(third);
             }
         }
-
     }
 
-    count
+    program
 }
 
-
-fn compress_loop(ast: AST) -> BrainFuckProgram {
-    if ast.is_empty() {
-        return vec![];
-    }
-
-    let mut sub = BrainFuckProgram::with_capacity(ast.len());;
-
-    if ast.len() == 1 {
-        match ast.get(0) {
-            Some(&BrainFuckAST::Decr) => {
-                sub.push(BrainFuckOpCode::ZeroOut);
-                return sub;
-            },
-            _ => {}
-        }
-    }
-
-    sub.push(BrainFuckOpCode::JumpF);
-    sub.append(&mut optimize(ast));
-    sub.push(BrainFuckOpCode::JumpB);
-    sub.shrink_to_fit();
-    sub
-}
-
-
-fn token_run_to_string(locs: &Jump, ops: &BrainFuckProgram) -> String {
-    let (start, finish) = *locs;
-    let mut s = String::with_capacity(finish - start + 1);
-
-    for token in &ops[start..finish+1] {
-        write!(s, "{}", token).ok();
-    }
-
-    s
-}
-
-
-fn build_jump_table(ops: &BrainFuckProgram) -> JumpTable {
-    let mut jumps = JumpTable::new();
+fn build_jumps(tokens: &mut Vec<BrainFuckToken>) {
     let mut brackets = Vec::new();
 
-    for (i, op) in ops.iter().enumerate() {
-        match *op {
-            BrainFuckOpCode::JumpF => {
-                brackets.push(i);
-            },
-            BrainFuckOpCode::JumpB => {
-                let partner = brackets.pop().unwrap();
-                jumps.insert(i, partner);
-                jumps.insert(partner, i);
-            },
+    for idx in 0..tokens.len() {
+        match tokens[idx] {
+            BrainFuckToken::JumpF(_) => brackets.push(idx),
+            BrainFuckToken::JumpB(_) => {
+                let partner = brackets
+                    .pop()
+                    .unwrap_or_else(|| panic!("unmatched bracket at {}", idx));
+                replace(&mut tokens[idx], BrainFuckToken::JumpB(partner));
+                replace(&mut tokens[partner], BrainFuckToken::JumpF(idx));
+            }
             _ => {}
         }
     }
 
-    jumps
+    if brackets.len() != 0 {
+        panic!("Unmatched brackets at: {:?}", brackets);
+    }
 }
-
-
-fn make_program(raw: String) -> Program {
-    let parsed = parse(&mut raw.chars());
-    let ops = optimize(parsed);
-    let jumps = build_jump_table(&ops);
-
-    Program::new(ops, jumps)
-}
-
 
 fn main() {
     use std::fs::File;
@@ -353,22 +289,25 @@ fn main() {
     use std::io::prelude::*;
     use std::env;
 
-    let arg1 = env::args().nth(1).unwrap_or_else(|| panic!("not enough args"));
+    let arg1 = env::args().nth(1).unwrap();
     let path = Path::new(&arg1);
     let mut s = String::new();
-    let mut file = File::open(&path).unwrap_or_else(|_| panic!("couldnt open filed"));
-    file.read_to_string(&mut s).unwrap_or_else(|_| panic!("couldnt read file"));;
+    let mut file = File::open(&path).unwrap();
+    file.read_to_string(&mut s).unwrap();
 
-    let mut prog = make_program(s);
+    let tokens = optimize(parse(s.chars()));
+    let mut prog = Program::new(tokens);
     let input = String::new();
     let mut output = String::new();
     prog.run(input, &mut output);
     println!("Output:\n{}", output);
-    let r = prog.trace.report(&prog.ops);
-    let mut report: Vec<(&String, &u32)> = r.iter().collect();
-    report.sort_by(|&(_, a), &(_, b)| { b.cmp(a) });
 
-    println!("\nTrace\n");
+    println!("\nTrace:\n");
+    let r = prog.tracer.report(&prog.ops);
+
+    let mut report: Vec<(&String, &u32)> = r.iter().collect();
+    report.sort_by(|&(_, a), &(_, b)| b.cmp(a));
+
     for (name, count) in report {
         println!("{} -> {}", name, count);
     }
